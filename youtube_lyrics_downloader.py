@@ -7,80 +7,196 @@ Original file is located at
     https://colab.research.google.com/drive/1yu_meg5fEINi9_L1Pv7qTwipP_5UlMeG
 """
 
-import streamlit as st
 import re
-from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
+import os
+import tempfile
+import streamlit as st
 from deep_translator import GoogleTranslator
+from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
 
-# -------- Helpers --------
+# Optional imports (loaded only if needed)
+def lazy_import_whisper():
+    import whisper
+    return whisper
+
+def lazy_import_ytdlp():
+    import yt_dlp
+    return yt_dlp
+
+# ---------------- Helpers ----------------
+
 def extract_video_id(url: str) -> str:
-    """Extract YouTube video ID from URL"""
-    match = re.search(r"(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})", url)
-    return match.group(1) if match else None
+    m = re.search(r"(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})", url)
+    return m.group(1) if m else None
 
-def fetch_transcript(video_id: str):
-    """Fetch transcript in English if possible, else any available language"""
+def fetch_any_transcript(video_id: str):
+    """
+    Try English captions first; otherwise return first available transcript (any language).
+    Returns: list of {text, start, duration} dicts OR None
+    """
     try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-
-        # Try English captions
+        tlist = YouTubeTranscriptApi.list_transcripts(video_id)
+        # English preferred
         try:
-            return transcript_list.find_transcript(['en']).fetch()
-        except:
+            return tlist.find_transcript(['en']).fetch()
+        except Exception:
             pass
-
-        # Otherwise, take the first available transcript (any language)
-        for transcript in transcript_list:
-            return transcript.fetch()
-
+        # Any available
+        for t in tlist:
+            return t.fetch()
         return None
     except (NoTranscriptFound, TranscriptsDisabled):
         return None
     except Exception as e:
-        st.error(f"Unexpected error: {e}")
+        st.error(f"Transcript lookup error: {e}")
         return None
 
 def transcript_to_text(transcript):
-    """Join transcript into plain text lyrics"""
-    return " ".join([entry["text"] for entry in transcript])
+    return " ".join(chunk["text"] for chunk in transcript)
 
-def translate_text(text, dest_lang="te"):
-    """Translate text into Telugu using deep-translator"""
-    return GoogleTranslator(source="auto", target=dest_lang).translate(text)
+def ensure_ffmpeg_available():
+    """Quick check that ffmpeg is available on PATH."""
+    from shutil import which
+    return which("ffmpeg") is not None
 
-# -------- Streamlit App --------
-st.set_page_config(page_title="YouTube → Telugu Lyrics BOT", layout="centered")
-st.title("🎶 YouTube Song to Telugu Lyrics BOT")
+def download_audio_with_ytdlp(url: str) -> str:
+    """
+    Download best audio using yt-dlp; returns path to audio file (m4a/mp3).
+    """
+    yt_dlp = lazy_import_ytdlp()
+    tmpdir = tempfile.mkdtemp()
+    outtmpl = os.path.join(tmpdir, "%(id)s.%(ext)s")
+    ydl_opts = {
+        "format": "bestaudio/best",
+        "outtmpl": outtmpl,
+        "noplaylist": True,
+        "quiet": True,
+        "postprocessors": [
+            {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}
+        ],
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        # Postprocessor above converts to mp3 with same ID
+        audio_path = os.path.join(tmpdir, f"{info['id']}.mp3")
+        if not os.path.exists(audio_path):
+            # Fallback to original extension if postprocess skipped
+            audio_path = os.path.join(tmpdir, f"{info['id']}.{info.get('ext','m4a')}")
+    return audio_path
 
-youtube_url = st.text_input("Enter YouTube Song URL:")
+def whisper_transcribe(audio_path: str, model_name: str = "small") -> str:
+    """
+    Transcribe audio locally using OpenAI Whisper (no API). Auto language detect.
+    """
+    whisper = lazy_import_whisper()
+    model = whisper.load_model(model_name)
+    # Tip: set fp16=False for CPU-only boxes to avoid warnings
+    result = model.transcribe(audio_path, fp16=False)  # auto-detect language
+    return result.get("text", "").strip()
 
-if youtube_url:
-    video_id = extract_video_id(youtube_url)
-
-    if not video_id:
-        st.error("❌ Invalid YouTube URL. Please check and try again.")
-    else:
-        st.info("⏳ Fetching transcript...")
-        transcript = fetch_transcript(video_id)
-
-        if not transcript:
-            st.error("❌ No captions available for this video (might be instrumental/live).")
+def chunk_translate(text: str, target: str = "te", max_chars: int = 4500) -> str:
+    """
+    Translate large text safely by chunking (deep-translator/Google has payload limits).
+    Splits on sentence-ish boundaries.
+    """
+    text = text.strip()
+    if not text:
+        return ""
+    # crude sentence split
+    sentences = re.split(r"([\.!\?\n])", text)
+    # recombine keeping delimiters
+    parts = []
+    buf = ""
+    for i in range(0, len(sentences), 2):
+        sent = sentences[i]
+        delim = sentences[i+1] if i+1 < len(sentences) else ""
+        piece = (sent + delim).strip()
+        if not piece:
+            continue
+        if len(buf) + len(piece) + 1 > max_chars:
+            parts.append(buf)
+            buf = piece
         else:
-            english_text = transcript_to_text(transcript)
-            st.subheader("Extracted Lyrics (Original):")
-            st.text_area("Original Captions", english_text, height=200)
+            buf = (buf + " " + piece).strip() if buf else piece
+    if buf:
+        parts.append(buf)
 
-            # Translate
-            st.info("⏳ Translating to Telugu...")
-            telugu_text = translate_text(english_text, dest_lang="te")
+    out = []
+    for p in parts:
+        out.append(GoogleTranslator(source="auto", target=target).translate(p))
+    return "\n".join(out)
 
-            st.subheader("🎵 Telugu Lyrics:")
-            st.text_area("Telugu Lyrics", telugu_text, height=200)
+# ---------------- UI ----------------
 
-            # Download Button
-            st.download_button(
-                label="⬇️ Download Telugu Lyrics",
-                data=telugu_text.encode("utf-8"),
-                file_name="telugu_lyrics.txt",
-                mime="text/plain"
-            )
+st.set_page_config(page_title="YouTube → Telugu Lyrics BOT", layout="centered")
+st.title("YouTube → Telugu Lyrics BOT")
+
+st.write("Paste a YouTube **song** URL. If captions exist, we’ll use them. Otherwise, we’ll **download audio** and **transcribe locally** (Whisper).")
+
+col1, col2 = st.columns(2)
+with col1:
+    url = st.text_input("YouTube URL", placeholder="https://www.youtube.com/watch?v=XXXXXXXXXXX")
+with col2:
+    model_name = st.selectbox("Whisper model (fallback only)", ["tiny", "base", "small", "medium"], index=2,
+                              help="Used only if no captions exist. Larger models are more accurate but slower.")
+
+go = st.button("Get Telugu Lyrics")
+
+if go:
+    if not url:
+        st.error("Please enter a valid YouTube URL.")
+    else:
+        vid = extract_video_id(url)
+        if not vid:
+            st.error("Could not parse a video ID from that URL.")
+        else:
+            with st.status("Fetching transcript…", expanded=False) as status:
+                transcript = fetch_any_transcript(vid)
+                if transcript:
+                    status.update(label="Transcript found. Preparing text…", state="complete")
+                    base_text = transcript_to_text(transcript)
+                else:
+                    status.update(label="No captions. Switching to audio transcription (Whisper)…", state="running")
+                    if not ensure_ffmpeg_available():
+                        status.update(state="error")
+                        st.error("FFmpeg is required for audio processing and was not found on PATH.")
+                        st.info("Install FFmpeg, then try again. For example:\n- Windows: winget install Gyan.FFmpeg\n- macOS: brew install ffmpeg\n- Ubuntu/Debian: sudo apt-get install ffmpeg")
+                        st.stop()
+                    try:
+                        audio_path = download_audio_with_ytdlp(url)
+                    except Exception as e:
+                        status.update(state="error")
+                        st.error(f"Audio download failed: {e}")
+                        st.stop()
+                    try:
+                        base_text = whisper_transcribe(audio_path, model_name=model_name)
+                        status.update(label="Transcription complete.", state="complete")
+                    except Exception as e:
+                        status.update(state="error")
+                        st.error(f"Whisper transcription failed: {e}")
+                        st.stop()
+
+            if not base_text.strip():
+                st.error("No text could be extracted/transcribed from this video.")
+            else:
+                st.subheader("Extracted Lyrics (Original)")
+                st.text_area("Original Text", base_text, height=220)
+
+                with st.status("Translating to Telugu…", expanded=False) as s2:
+                    try:
+                        telugu_text = chunk_translate(base_text, target="te")
+                        s2.update(label="Translation complete.", state="complete")
+                    except Exception as e:
+                        s2.update(state="error")
+                        st.error(f"Translation failed: {e}")
+                        st.stop()
+
+                st.subheader("Telugu Lyrics")
+                st.text_area("Telugu", telugu_text, height=220)
+
+                st.download_button(
+                    "Download Telugu Lyrics (TXT)",
+                    data=telugu_text.encode("utf-8"),
+                    file_name="telugu_lyrics.txt",
+                    mime="text/plain"
+                )
