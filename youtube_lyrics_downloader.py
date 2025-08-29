@@ -10,7 +10,7 @@ Original file is located at
 import streamlit as st
 import re
 from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
-from googletrans import Translator
+from deep_translator import GoogleTranslator
 
 # -------- Helpers --------
 def extract_video_id(url: str) -> str:
@@ -18,10 +18,17 @@ def extract_video_id(url: str) -> str:
     match = re.search(r"(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})", url)
     return match.group(1) if match else None
 
-def fetch_transcript(video_id: str, lang="en"):
+def fetch_transcript(video_id: str):
     """Fetch transcript if available"""
     try:
-        return YouTubeTranscriptApi.get_transcript(video_id, languages=[lang])
+        # auto fetch any available transcript
+        transcript = YouTubeTranscriptApi.list_transcripts(video_id)
+        # Prefer English, fallback to first available
+        try:
+            return transcript.find_transcript(['en']).fetch()
+        except:
+            return transcript.find_transcript(transcript._manually_created_transcripts.keys() 
+                                              or transcript._generated_transcripts.keys()).fetch()
     except (NoTranscriptFound, TranscriptsDisabled):
         return None
     except Exception as e:
@@ -33,10 +40,8 @@ def transcript_to_text(transcript):
     return " ".join([entry["text"] for entry in transcript])
 
 def translate_text(text, dest_lang="te"):
-    """Translate text into Telugu"""
-    translator = Translator()
-    translated = translator.translate(text, dest=dest_lang)
-    return translated.text
+    """Translate text into Telugu using deep-translator"""
+    return GoogleTranslator(source="auto", target=dest_lang).translate(text)
 
 # -------- Streamlit App --------
 st.set_page_config(page_title="YouTube → Telugu Lyrics BOT", layout="centered")
@@ -51,14 +56,14 @@ if youtube_url:
         st.error("❌ Invalid YouTube URL. Please check and try again.")
     else:
         st.info("⏳ Fetching transcript...")
-        transcript = fetch_transcript(video_id, lang="en")
+        transcript = fetch_transcript(video_id)
 
         if not transcript:
             st.error("❌ No captions available for this video (might be instrumental/live).")
         else:
             english_text = transcript_to_text(transcript)
-            st.subheader("Extracted English Lyrics (Raw):")
-            st.text_area("English Lyrics", english_text, height=200)
+            st.subheader("Extracted Lyrics (Original):")
+            st.text_area("Original Captions", english_text, height=200)
 
             # Translate
             st.info("⏳ Translating to Telugu...")
