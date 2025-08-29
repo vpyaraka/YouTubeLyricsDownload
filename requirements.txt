@@ -1,3 +1,4 @@
 streamlit==1.38.0
 youtube-transcript-api==0.6.2
 deep-translator==1.11.4
+
