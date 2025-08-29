@@ -8,96 +8,69 @@ Original file is located at
 """
 
 import streamlit as st
-from youtube_transcript_api import YouTubeTranscriptApi
-from urllib.parse import urlparse, parse_qs
+import re
+from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
+from googletrans import Translator
 
-def extract_video_id(url):
-    """
-    Extracts the YouTube video ID from a given URL.
-    Handles both standard youtube.com and shortened youtu.be URLs.
+# -------- Helpers --------
+def extract_video_id(url: str) -> str:
+    """Extract YouTube video ID from URL"""
+    match = re.search(r"(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})", url)
+    return match.group(1) if match else None
 
-    Args:
-        url (str): The YouTube video URL.
-
-    Returns:
-        str: The extracted video ID, or None if the URL is invalid.
-    """
+def fetch_transcript(video_id: str, lang="en"):
+    """Fetch transcript if available"""
     try:
-        if "youtu.be" in url:
-            return url.split("/")[-1].split("?")[0]
-
-        query = urlparse(url).query
-        params = parse_qs(query)
-
-        if "v" in params:
-            return params["v"][0]
-    except Exception:
+        return YouTubeTranscriptApi.get_transcript(video_id, languages=[lang])
+    except (NoTranscriptFound, TranscriptsDisabled):
         return None
-    return None
-
-def get_lyrics(video_id):
-    """
-    Fetches the transcript (lyrics) for a given YouTube video ID.
-
-    Args:
-        video_id (str): The ID of the YouTube video.
-
-    Returns:
-        str: The extracted lyrics as a single string, or an error message.
-    """
-    try:
-        # Get the transcript directly from the imported function.
-        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'en-US'])
-
-        # Join the transcript entries into a single block of text
-        lyrics = " ".join([entry['text'] for entry in transcript])
-        return lyrics
     except Exception as e:
-        return f"Error: Could not retrieve transcript. This may be due to no captions being available for this video or the video being a live stream. Details: {e}"
+        st.error(f"Unexpected error: {e}")
+        return None
 
-def main():
-    """
-    The main Streamlit application function.
-    """
-    st.set_page_config(page_title="YouTube Lyrics Downloader", page_icon="🎵")
-    st.title("YouTube Lyrics Downloader 🎵")
-    st.markdown("Enter a YouTube video URL to extract and download its lyrics.")
+def transcript_to_text(transcript):
+    """Join transcript into plain text lyrics"""
+    return " ".join([entry["text"] for entry in transcript])
 
+def translate_text(text, dest_lang="te"):
+    """Translate text into Telugu"""
+    translator = Translator()
+    translated = translator.translate(text, dest=dest_lang)
+    return translated.text
 
-    # Text input for the YouTube URL
-    youtube_url = st.text_input(
-        "YouTube Video URL",
-        placeholder="e.g., https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-    )
+# -------- Streamlit App --------
+st.set_page_config(page_title="YouTube → Telugu Lyrics BOT", layout="centered")
+st.title("🎶 YouTube Song to Telugu Lyrics BOT")
 
-    # Button to trigger the lyrics extraction process
-    if st.button("Get Lyrics"):
-        if youtube_url:
-            with st.spinner('Extracting lyrics...'):
-                video_id = extract_video_id(youtube_url)
-                if video_id:
-                    lyrics = get_lyrics(video_id)
+youtube_url = st.text_input("Enter YouTube Song URL:")
 
-                    if not lyrics.startswith("Error"):
-                        st.success("Lyrics extracted successfully! 🎉")
-                        st.subheader("Extracted Lyrics")
+if youtube_url:
+    video_id = extract_video_id(youtube_url)
 
-                        # Display the lyrics in a text area
-                        st.text_area("Lyrics", lyrics, height=400)
+    if not video_id:
+        st.error("❌ Invalid YouTube URL. Please check and try again.")
+    else:
+        st.info("⏳ Fetching transcript...")
+        transcript = fetch_transcript(video_id, lang="en")
 
-                        # Provide a download button for the lyrics
-                        st.download_button(
-                            label="Download Lyrics as .txt file",
-                            data=lyrics,
-                            file_name="lyrics.txt",
-                            mime="text/plain"
-                        )
-                    else:
-                        st.error(lyrics)
-                else:
-                    st.error("Invalid YouTube URL. Please enter a valid URL.")
+        if not transcript:
+            st.error("❌ No captions available for this video (might be instrumental/live).")
         else:
-            st.warning("Please enter a YouTube URL to proceed.")
+            english_text = transcript_to_text(transcript)
+            st.subheader("Extracted English Lyrics (Raw):")
+            st.text_area("English Lyrics", english_text, height=200)
 
-if __name__ == "__main__":
-    main()
+            # Translate
+            st.info("⏳ Translating to Telugu...")
+            telugu_text = translate_text(english_text, dest_lang="te")
+
+            st.subheader("🎵 Telugu Lyrics:")
+            st.text_area("Telugu Lyrics", telugu_text, height=200)
+
+            # Download Button
+            st.download_button(
+                label="⬇️ Download Telugu Lyrics",
+                data=telugu_text.encode("utf-8"),
+                file_name="telugu_lyrics.txt",
+                mime="text/plain"
+            )
