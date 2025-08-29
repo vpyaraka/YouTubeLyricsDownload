@@ -19,16 +19,21 @@ def extract_video_id(url: str) -> str:
     return match.group(1) if match else None
 
 def fetch_transcript(video_id: str):
-    """Fetch transcript if available"""
+    """Fetch transcript in English if possible, else any available language"""
     try:
-        # auto fetch any available transcript
-        transcript = YouTubeTranscriptApi.list_transcripts(video_id)
-        # Prefer English, fallback to first available
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+
+        # Try English captions
         try:
-            return transcript.find_transcript(['en']).fetch()
+            return transcript_list.find_transcript(['en']).fetch()
         except:
-            return transcript.find_transcript(transcript._manually_created_transcripts.keys() 
-                                              or transcript._generated_transcripts.keys()).fetch()
+            pass
+
+        # Otherwise, take the first available transcript (any language)
+        for transcript in transcript_list:
+            return transcript.fetch()
+
+        return None
     except (NoTranscriptFound, TranscriptsDisabled):
         return None
     except Exception as e:
